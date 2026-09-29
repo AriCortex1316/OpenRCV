@@ -5,10 +5,16 @@
 
 namespace openrcv::workflow {
 
+enum class BootFirmware {
+    Uefi,
+    Bios,
+};
+
 enum class DeploymentOperationType {
     FormatTarget,
     ApplyImage,
     WriteUnattend,
+    ConfigureOfflineSettings,
     ConfigureBoot,
 };
 
@@ -17,8 +23,11 @@ struct DeploymentRequest {
     int imageIndex{};
     std::wstring targetRoot;
     std::wstring systemPartitionRoot;
+    BootFirmware bootFirmware{BootFirmware::Uefi};
+    std::wstring bootLocale;
     bool formatTarget{};
     std::wstring confirmedFormatTarget;
+    bool configureOfflineSettings{};
 };
 
 struct DeploymentOperation {

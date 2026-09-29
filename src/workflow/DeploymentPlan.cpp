@@ -47,8 +47,8 @@ DeploymentPlan BuildDeploymentPlan(const DeploymentRequest& request) {
         plan.operations.push_back({
             DeploymentOperationType::FormatTarget,
             L"格式化目标分区 " + request.targetRoot,
-            L"format.com",
-            {request.targetRoot.substr(0, 2), L"/FS:NTFS", L"/Q", L"/Y", L"/V:Windows"},
+            L"diskpart.exe",
+            {request.targetRoot},
             true,
         });
     }
@@ -58,24 +58,41 @@ DeploymentPlan BuildDeploymentPlan(const DeploymentRequest& request) {
         L"应用 Windows 镜像到 " + request.targetRoot,
         L"dism.exe",
         {L"/Apply-Image", L"/ImageFile:" + request.imageFile,
-         L"/Index:" + std::to_wstring(request.imageIndex), L"/ApplyDir:" + request.targetRoot},
+         L"/Index:" + std::to_wstring(request.imageIndex),
+         L"/ApplyDir:" + request.targetRoot, L"/CheckIntegrity"},
         true,
     });
     plan.operations.push_back({
         DeploymentOperationType::WriteUnattend,
         L"写入无人值守配置",
         L"",
-        {JoinPath(request.targetRoot, L"Windows\\Panther\\unattend.xml")},
+        {JoinPath(request.targetRoot, L"Windows\\Panther\\unattend.xml"),
+         JoinPath(request.targetRoot, L"Windows\\System32\\Oobe\\Info\\Oobe.xml")},
         true,
     });
 
+    if (request.configureOfflineSettings) {
+        plan.operations.push_back({
+            DeploymentOperationType::ConfigureOfflineSettings,
+            L"写入高级设置",
+            L"",
+            {request.targetRoot},
+            true,
+        });
+    }
+
     std::vector<std::wstring> bootArguments{JoinPath(request.targetRoot, L"Windows")};
+    if (!request.bootLocale.empty()) {
+        bootArguments.push_back(L"/l");
+        bootArguments.push_back(request.bootLocale);
+    }
     if (!request.systemPartitionRoot.empty()) {
         bootArguments.push_back(L"/s");
         bootArguments.push_back(request.systemPartitionRoot.substr(0, 2));
     }
     bootArguments.push_back(L"/f");
-    bootArguments.push_back(L"ALL");
+    bootArguments.push_back(request.bootFirmware == BootFirmware::Uefi
+                                ? L"UEFI" : L"BIOS");
     plan.operations.push_back({
         DeploymentOperationType::ConfigureBoot,
         L"配置 Windows 启动文件",

@@ -1,8 +1,11 @@
+#include "openrcv/config/OfflineSettings.h"
 #include "openrcv/imaging/WindowsImage.h"
 #include "openrcv/process/ProcessRunner.h"
 #include "openrcv/unattend/UnattendBuilder.h"
 #include "openrcv/workflow/DeploymentPlan.h"
 
+#include <algorithm>
+#include <atomic>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -37,19 +40,71 @@ void CommandLineQuotingEscapesQuotesAndTrailingSlashes() {
                 L"CommandLineQuotingEscapesQuotesAndTrailingSlashes");
 }
 
-void DismParserReturnsImageIndexesAndNames() {
-    const std::wstring output =
-        L"Deployment Image Servicing and Management tool\r\n"
-        L"Index : 1\r\nName : Windows 11 Pro\r\n"
-        L"Index : 2\r\nName : Windows 11 Enterprise\r\n";
+void DismProgressParserReturnsLatestPercentage() {
+    const auto progress = openrcv::process::ParseDismProgressPercentage(
+        L"[===== 25.0% ]\r[========== 67.4% ]");
+    Expect(progress.has_value() && *progress == 67,
+           L"DismProgressParserReturnsLatestPercentage");
+    Expect(!openrcv::process::ParseDismProgressPercentage(L"操作成功完成。").has_value(),
+           L"DismProgressParserIgnoresOutputWithoutPercentage");
+}
+
+void ProcessRunnerStreamsOutput() {
+    std::wstring streamed;
+    openrcv::process::ProcessRunOptions options;
+    options.outputCallback = [&](std::wstring_view chunk) {
+        streamed.append(chunk.data(), chunk.size());
+    };
+    const auto result = openrcv::process::RunHidden(
+        L"cmd.exe", {L"/d", L"/c", L"echo OpenRCV-stream-test"}, options);
+    if (!result.Succeeded()) {
+        std::wcerr << L"ProcessRunner stream error: system=" << result.systemError
+                   << L" exit=" << result.exitCode << L"\n";
+    }
+    Expect(result.Succeeded(), L"ProcessRunnerStreamsOutputCommandSucceeds");
+    Expect(streamed.find(L"OpenRCV-stream-test") != std::wstring::npos,
+           L"ProcessRunnerStreamsOutputBeforeReturning");
+}
+
+void ProcessRunnerCancelsRunningProcess() {
+    std::atomic_bool cancellationRequested{};
+    openrcv::process::ProcessRunOptions options;
+    options.cancellationRequested = &cancellationRequested;
+    options.outputCallback = [&](std::wstring_view chunk) {
+        if (!chunk.empty()) cancellationRequested.store(true);
+    };
+    const auto result = openrcv::process::RunHidden(
+        L"ping.exe", {L"127.0.0.1", L"-n", L"20"}, options);
+    if (!result.cancelled) {
+        std::wcerr << L"ProcessRunner cancel error: system=" << result.systemError
+                   << L" exit=" << result.exitCode << L"\n";
+    }
+    Expect(result.cancelled && !result.Succeeded(),
+           L"ProcessRunnerCancelsRunningProcess");
+}
+
+void WimMetadataParserReturnsImagesAndArchitectures() {
+    const std::wstring xml =
+        L"<WIM><IMAGE INDEX=\"1\"><NAME>Windows 11 Home</NAME>"
+        L"<WINDOWS><ARCH>0</ARCH></WINDOWS></IMAGE>"
+        L"<IMAGE INDEX=\"2\"><NAME>Windows 11 Pro &amp; Workstation</NAME>"
+        L"<WINDOWS><ARCH>9</ARCH></WINDOWS></IMAGE>"
+        L"<IMAGE INDEX=\"3\"><NAME>Windows 11 ARM64</NAME>"
+        L"<WINDOWS><ARCH>12</ARCH></WINDOWS></IMAGE></WIM>";
     const std::vector<openrcv::imaging::WindowsImage> images =
-        openrcv::imaging::ParseDismImageInfo(output);
-    Expect(images.size() == 2, L"DismParserReturnsTwoImages");
-    if (images.size() == 2) {
-        Expect(images[0].index == 1 && images[0].name == L"Windows 11 Pro",
-               L"DismParserReturnsFirstImage");
-        Expect(images[1].index == 2 && images[1].name == L"Windows 11 Enterprise",
-               L"DismParserReturnsSecondImage");
+        openrcv::imaging::ParseWimImageInfoXml(xml);
+    Expect(images.size() == 3, L"WimMetadataParserReturnsThreeImages");
+    if (images.size() == 3) {
+        Expect(images[0].index == 1 && images[0].name == L"Windows 11 Home" &&
+                   images[0].architecture == openrcv::imaging::ImageArchitecture::X86,
+               L"WimMetadataParserReturnsX86Image");
+        Expect(images[1].index == 2 &&
+                   images[1].name == L"Windows 11 Pro & Workstation" &&
+                   images[1].architecture == openrcv::imaging::ImageArchitecture::Amd64,
+               L"WimMetadataParserReturnsAmd64ImageAndDecodesName");
+        Expect(images[2].index == 3 &&
+                   images[2].architecture == openrcv::imaging::ImageArchitecture::Arm64,
+               L"WimMetadataParserReturnsArm64Image");
     }
 }
 
@@ -65,6 +120,180 @@ void UnattendBuilderCreatesLocalAdmin() {
            L"UnattendBuilderUsesAmd64Architecture");
 }
 
+void UnattendBuilderUsesSelectedLocales() {
+    openrcv::unattend::UnattendOptions options;
+    options.region = openrcv::config::SupportedRegions()[2];
+    const std::wstring xml = openrcv::unattend::BuildUnattendXml(options);
+    Expect(xml.find(L"<UILanguage>") == std::wstring::npos &&
+               xml.find(L"<UILanguageFallback>") == std::wstring::npos,
+           L"UnattendBuilderLeavesImageUiLanguageUnchanged");
+    Expect(xml.find(L"Microsoft-Windows-International-Core-WinPE") !=
+               std::wstring::npos,
+           L"UnattendBuilderConfiguresWindowsPeLocales");
+    Expect(xml.find(L"<InputLocale>0411:00000411</InputLocale>") !=
+               std::wstring::npos,
+           L"UnattendBuilderUsesSelectedInputLocale");
+    Expect(xml.find(L"<SystemLocale>ja-JP</SystemLocale>") != std::wstring::npos,
+           L"UnattendBuilderUsesSelectedSystemLocale");
+    Expect(xml.find(L"<UserLocale>ja-JP</UserLocale>") != std::wstring::npos,
+           L"UnattendBuilderUsesSelectedRegion");
+    Expect(xml.find(L"Set-WinHomeLocation -GeoId 122") != std::wstring::npos,
+           L"UnattendBuilderSetsSelectedHomeLocationAtFirstLogon");
+    const std::wstring oobe = openrcv::unattend::BuildOobeXml(options.region);
+    Expect(oobe.find(L"<location>122</location>") != std::wstring::npos,
+           L"OobeBuilderUsesSelectedDeviceRegion");
+    Expect(oobe.find(L"<keyboard>0411:00000411</keyboard>") !=
+               std::wstring::npos,
+           L"OobeBuilderUsesSelectedKeyboard");
+}
+
+void RegionConfigurationsKeepLocalesAndGeoIdsTogether() {
+    const auto& regions = openrcv::config::SupportedRegions();
+    Expect(regions.size() == 5, L"RegionConfigurationsListsSupportedRegions");
+    if (regions.size() == 5) {
+        Expect(regions[0].locale == L"zh-CN" && regions[0].geoId == 45,
+               L"RegionConfigurationsMapsChina");
+        Expect(regions[1].locale == L"zh-HK" &&
+                   regions[1].inputLocale == L"0C04:00000409" &&
+                   regions[1].geoId == 104,
+               L"RegionConfigurationsMapsHongKong");
+        Expect(regions[2].locale == L"ja-JP" && regions[2].geoId == 122,
+               L"RegionConfigurationsMapsJapan");
+        Expect(regions[3].locale == L"en-SG" &&
+                   regions[3].inputLocale == L"4809:00000409" &&
+                   regions[3].geoId == 215,
+               L"RegionConfigurationsMapsSingapore");
+        Expect(regions[4].locale == L"en-US" && regions[4].geoId == 244,
+               L"RegionConfigurationsMapsUnitedStates");
+    }
+}
+
+void UnattendBuilderUsesSelectedArchitecture() {
+    openrcv::unattend::UnattendOptions options;
+    options.architecture = openrcv::unattend::ProcessorArchitecture::X86;
+    std::wstring xml = openrcv::unattend::BuildUnattendXml(options);
+    Expect(xml.find(L"processorArchitecture=\"x86\"") != std::wstring::npos,
+           L"UnattendBuilderUsesX86Architecture");
+    options.architecture = openrcv::unattend::ProcessorArchitecture::Arm64;
+    xml = openrcv::unattend::BuildUnattendXml(options);
+    Expect(xml.find(L"processorArchitecture=\"arm64\"") != std::wstring::npos,
+           L"UnattendBuilderUsesArm64Architecture");
+}
+
+void UnattendBuilderDisablesSetupDynamicUpdate() {
+    const std::wstring xml =
+        openrcv::unattend::BuildUnattendXml(openrcv::unattend::UnattendOptions{});
+    Expect(xml.find(L"<settings pass=\"windowsPE\">") != std::wstring::npos,
+           L"UnattendBuilderAddsWindowsPeSettings");
+    Expect(xml.find(L"<DynamicUpdate>\r\n"
+                    L"        <Enable>false</Enable>\r\n"
+                    L"        <WillShowUI>Never</WillShowUI>") !=
+               std::wstring::npos,
+           L"UnattendBuilderDisablesSetupDynamicUpdate");
+}
+
+void UnattendBuilderBlocksNetworkOnlyDuringSkippedOobe() {
+    openrcv::unattend::UnattendOptions options;
+    options.skipOnlineAccountScreens = true;
+    std::wstring xml = openrcv::unattend::BuildUnattendXml(options);
+    Expect(xml.find(L"<settings pass=\"specialize\">") != std::wstring::npos,
+           L"UnattendBuilderAddsSpecializeNetworkBlock");
+    Expect(xml.find(L"HideWirelessSetupInOOBE>true") != std::wstring::npos,
+           L"UnattendBuilderHidesOobeNetworkPage");
+    Expect(xml.find(L"advfirewall firewall add rule") != std::wstring::npos,
+           L"UnattendBuilderBlocksOobeOutboundNetwork");
+    Expect(xml.find(L"advfirewall firewall delete rule") != std::wstring::npos,
+           L"UnattendBuilderRestoresNetworkAtFirstLogon");
+
+    options.skipOnlineAccountScreens = false;
+    xml = openrcv::unattend::BuildUnattendXml(options);
+    Expect(xml.find(L"OpenRCV OOBE Network Block") == std::wstring::npos &&
+               xml.find(L"HideWirelessSetupInOOBE") == std::wstring::npos,
+           L"UnattendBuilderKeepsNetworkWhenOobeSkipIsDisabled");
+}
+
+void UnattendBuilderInstallsWindowsUpdatePauseTask() {
+    openrcv::unattend::UnattendOptions options;
+    options.skipOnlineAccountScreens = false;
+    options.pauseWindowsUpdate = true;
+    const std::wstring xml = openrcv::unattend::BuildUnattendXml(options);
+    Expect(xml.find(L"schtasks.exe /Create /TN PauseWindowsUpdate") !=
+               std::wstring::npos &&
+               xml.find(L"schtasks.exe /Run /TN PauseWindowsUpdate") !=
+               std::wstring::npos,
+           L"UnattendBuilderRegistersAndStartsWindowsUpdatePauseTask");
+}
+
+bool ContainsRegistryChange(
+    const std::vector<openrcv::config::RegistryChange>& changes,
+    openrcv::config::OfflineHive hive, const std::wstring& subkey,
+    const std::wstring& valueName, std::uint32_t value) {
+    for (const auto& change : changes) {
+        if (change.hive == hive && change.subkey == subkey &&
+            change.valueName == valueName && change.value == value) return true;
+    }
+    return false;
+}
+
+void OfflineSettingsMapAdvancedOptionsToRegistry() {
+    openrcv::config::AdvancedSettings settings;
+    settings.disableWindowsUpdate = true;
+    settings.showFileExtensions = true;
+    settings.showThisPcOnDesktop = true;
+    settings.disableWidgets = true;
+    settings.disableFastStartup = true;
+    settings.disableUac = true;
+    settings.preventBitLocker = true;
+    settings.excludeWindowsUpdateDrivers = true;
+    const auto changes = openrcv::config::BuildOfflineRegistryChanges(settings, 2);
+    Expect(changes.size() == 9, L"OfflineSettingsCreatesEveryRequestedChange");
+    Expect(!ContainsRegistryChange(changes, openrcv::config::OfflineHive::Software,
+               L"Policies\\Microsoft\\Windows\\WindowsUpdate\\AU",
+               L"NoAutoUpdate", 1),
+           L"OfflineSettingsDoesNotPermanentlyDisableWindowsUpdate");
+    Expect(ContainsRegistryChange(changes, openrcv::config::OfflineHive::System,
+               L"ControlSet002\\Control\\Session Manager\\Power",
+               L"HiberbootEnabled", 0),
+           L"OfflineSettingsDisablesFastStartupInCurrentControlSet");
+    Expect(ContainsRegistryChange(changes, openrcv::config::OfflineHive::DefaultUser,
+               L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced",
+               L"HideFileExt", 0),
+           L"OfflineSettingsShowsFileExtensionsForDefaultUser");
+    Expect(ContainsRegistryChange(changes, openrcv::config::OfflineHive::DefaultUser,
+               L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\HideDesktopIcons\\NewStartPanel",
+               L"{20D04FE0-3AEA-1069-A2D8-08002B30309D}", 0),
+           L"OfflineSettingsShowsThisPcForNewStartPanel");
+    Expect(ContainsRegistryChange(changes, openrcv::config::OfflineHive::DefaultUser,
+               L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\HideDesktopIcons\\ClassicStartMenu",
+               L"{20D04FE0-3AEA-1069-A2D8-08002B30309D}", 0),
+           L"OfflineSettingsShowsThisPcForClassicStartMenu");
+    Expect(ContainsRegistryChange(changes, openrcv::config::OfflineHive::Software,
+               L"Policies\\Microsoft\\Dsh", L"AllowNewsAndInterests", 0),
+           L"OfflineSettingsDisablesWidgets");
+    Expect(ContainsRegistryChange(changes, openrcv::config::OfflineHive::Software,
+               L"Microsoft\\Windows\\CurrentVersion\\Policies\\System",
+               L"EnableLUA", 0),
+           L"OfflineSettingsDisablesUac");
+    Expect(ContainsRegistryChange(changes, openrcv::config::OfflineHive::System,
+               L"ControlSet002\\Control\\BitLocker",
+               L"PreventDeviceEncryption", 1),
+           L"OfflineSettingsPreventsAutomaticBitLocker");
+    Expect(ContainsRegistryChange(changes, openrcv::config::OfflineHive::Software,
+               L"Policies\\Microsoft\\Windows\\WindowsUpdate",
+               L"ExcludeWUDriversInQualityUpdate", 1),
+           L"OfflineSettingsExcludesWindowsUpdateDrivers");
+    Expect(openrcv::config::BuildOfflineRegistryChanges({}, 1).empty(),
+           L"OfflineSettingsLeavesRegistryUntouchedWhenDisabled");
+
+    const std::wstring taskXml =
+        openrcv::config::BuildPauseWindowsUpdateTaskXml();
+    Expect(taskXml.find(L"encoding=\"UTF-16\"") != std::wstring::npos &&
+               taskXml.find(L"<Interval>P1D</Interval>") != std::wstring::npos &&
+               taskXml.find(L"AddDays(7)") != std::wstring::npos &&
+               taskXml.find(L"PauseUpdatesExpiryTime") != std::wstring::npos,
+           L"OfflineSettingsBuildsRecurringWindowsUpdatePauseTask");
+}
+
 void DeploymentPlanRejectsUnconfirmedFormat() {
     openrcv::workflow::DeploymentRequest request;
     request.imageFile = L"D:\\sources\\install.wim";
@@ -74,6 +303,25 @@ void DeploymentPlanRejectsUnconfirmedFormat() {
     const openrcv::workflow::DeploymentPlan plan =
         openrcv::workflow::BuildDeploymentPlan(request);
     Expect(!plan.IsValid(), L"DeploymentPlanRejectsUnconfirmedFormat");
+}
+
+void DeploymentPlanUsesDiskPartForConfirmedFormat() {
+    openrcv::workflow::DeploymentRequest request;
+    request.imageFile = L"D:\\sources\\install.wim";
+    request.imageIndex = 1;
+    request.targetRoot = L"C:\\";
+    request.formatTarget = true;
+    request.confirmedFormatTarget = L"C:\\";
+    const auto plan = openrcv::workflow::BuildDeploymentPlan(request);
+    Expect(plan.IsValid() && !plan.operations.empty(),
+           L"DeploymentPlanAcceptsConfirmedFormat");
+    if (!plan.operations.empty()) {
+        Expect(plan.operations.front().type ==
+                   openrcv::workflow::DeploymentOperationType::FormatTarget &&
+               plan.operations.front().executable == L"diskpart.exe" &&
+               plan.operations.front().arguments == std::vector<std::wstring>{L"C:\\"},
+               L"DeploymentPlanUsesDiskPartForFormat");
+    }
 }
 
 void DeploymentPlanCreatesApplyAndBootOperations() {
@@ -89,8 +337,61 @@ void DeploymentPlanCreatesApplyAndBootOperations() {
     if (plan.operations.size() == 3) {
         Expect(plan.operations[0].type == openrcv::workflow::DeploymentOperationType::ApplyImage,
                L"DeploymentPlanAppliesImageFirst");
+        Expect(plan.operations[0].arguments.back() == L"/CheckIntegrity",
+               L"DeploymentPlanChecksImageIntegrity");
+        Expect(plan.operations[1].arguments.size() == 2 &&
+                   plan.operations[1].arguments[1] ==
+                       L"C:\\Windows\\System32\\Oobe\\Info\\Oobe.xml",
+               L"DeploymentPlanWritesOobeRegionConfiguration");
         Expect(plan.operations[2].type == openrcv::workflow::DeploymentOperationType::ConfigureBoot,
                L"DeploymentPlanConfiguresBootLast");
+    }
+}
+
+void DeploymentPlanSelectsBcdBootFirmwareAndLocale() {
+    openrcv::workflow::DeploymentRequest request;
+    request.imageFile = L"D:\\sources\\install.wim";
+    request.imageIndex = 1;
+    request.targetRoot = L"C:\\";
+    request.systemPartitionRoot = L"S:\\";
+    request.bootFirmware = openrcv::workflow::BootFirmware::Uefi;
+    request.bootLocale = L"zh-CN";
+    auto plan = openrcv::workflow::BuildDeploymentPlan(request);
+    const std::vector<std::wstring> expectedUefi{
+        L"C:\\Windows", L"/l", L"zh-CN", L"/s", L"S:", L"/f", L"UEFI"};
+    Expect(plan.IsValid() && plan.operations.back().arguments == expectedUefi,
+           L"DeploymentPlanUsesUefiBcdBootAndSelectedLocale");
+
+    request.bootFirmware = openrcv::workflow::BootFirmware::Bios;
+    request.bootLocale = L"en-US";
+    plan = openrcv::workflow::BuildDeploymentPlan(request);
+    const std::vector<std::wstring> expectedBios{
+        L"C:\\Windows", L"/l", L"en-US", L"/s", L"S:", L"/f", L"BIOS"};
+    Expect(plan.IsValid() && plan.operations.back().arguments == expectedBios,
+           L"DeploymentPlanUsesBiosBcdBootAndSelectedLocale");
+
+    request.bootLocale.clear();
+    plan = openrcv::workflow::BuildDeploymentPlan(request);
+    const auto& defaultArguments = plan.operations.back().arguments;
+    Expect(std::find(defaultArguments.begin(), defaultArguments.end(), L"/l") ==
+               defaultArguments.end(),
+           L"DeploymentPlanDoesNotForceDefaultBootLanguage");
+}
+
+void DeploymentPlanAddsOfflineSettingsWhenRequested() {
+    openrcv::workflow::DeploymentRequest request;
+    request.imageFile = L"D:\\sources\\install.wim";
+    request.imageIndex = 1;
+    request.targetRoot = L"C:\\";
+    request.systemPartitionRoot = L"S:\\";
+    request.configureOfflineSettings = true;
+    const auto plan = openrcv::workflow::BuildDeploymentPlan(request);
+    Expect(plan.IsValid() && plan.operations.size() == 4,
+           L"DeploymentPlanAddsOfflineSettingsOperation");
+    if (plan.operations.size() == 4) {
+        Expect(plan.operations[2].type ==
+                   openrcv::workflow::DeploymentOperationType::ConfigureOfflineSettings,
+               L"DeploymentPlanConfiguresOfflineSettingsBeforeBoot");
     }
 }
 
@@ -99,10 +400,23 @@ void DeploymentPlanCreatesApplyAndBootOperations() {
 int wmain() {
     CommandLineQuotingPreservesSpaces();
     CommandLineQuotingEscapesQuotesAndTrailingSlashes();
-    DismParserReturnsImageIndexesAndNames();
+    DismProgressParserReturnsLatestPercentage();
+    ProcessRunnerStreamsOutput();
+    ProcessRunnerCancelsRunningProcess();
+    WimMetadataParserReturnsImagesAndArchitectures();
     UnattendBuilderCreatesLocalAdmin();
+    UnattendBuilderUsesSelectedLocales();
+    RegionConfigurationsKeepLocalesAndGeoIdsTogether();
+    UnattendBuilderUsesSelectedArchitecture();
+    UnattendBuilderDisablesSetupDynamicUpdate();
+    UnattendBuilderBlocksNetworkOnlyDuringSkippedOobe();
+    UnattendBuilderInstallsWindowsUpdatePauseTask();
+    OfflineSettingsMapAdvancedOptionsToRegistry();
     DeploymentPlanRejectsUnconfirmedFormat();
+    DeploymentPlanUsesDiskPartForConfirmedFormat();
     DeploymentPlanCreatesApplyAndBootOperations();
+    DeploymentPlanSelectsBcdBootFirmwareAndLocale();
+    DeploymentPlanAddsOfflineSettingsWhenRequested();
     if (failures == 0) std::wcout << L"All OpenRCV core tests passed.\n";
     return failures == 0 ? 0 : 1;
 }

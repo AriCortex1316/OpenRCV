@@ -2,10 +2,6 @@
 
 #include "openrcv/workflow/ImageSourceService.h"
 
-#include "openrcv/process/ProcessRunner.h"
-
-#include <iterator>
-
 namespace openrcv::workflow {
 
 ImageSourceResult ImageSourceService::LoadIso(const std::wstring& isoPath) {
@@ -25,31 +21,19 @@ ImageSourceResult ImageSourceService::LoadIso(const std::wstring& isoPath) {
     }
     result.messages.push_back(L"发现系统镜像：" + result.imageFile);
 
-    wchar_t systemDirectory[MAX_PATH]{};
-    const UINT length = GetSystemDirectoryW(systemDirectory, static_cast<UINT>(std::size(systemDirectory)));
-    if (length == 0 || length >= std::size(systemDirectory)) {
-        result.messages.emplace_back(L"无法定位 WinPE 系统目录。");
+    std::uint32_t imageError = ERROR_SUCCESS;
+    if (!imaging::LoadWindowsImages(result.imageFile, result.images, imageError)) {
+        result.messages.push_back(L"WIMGAPI 读取镜像信息失败，系统错误 " +
+                                  std::to_wstring(imageError));
         return result;
     }
-
-    const std::wstring dism = std::wstring(systemDirectory) + L"\\dism.exe";
-    const process::ProcessResult processResult = process::RunHidden(
-        dism, {L"/English", L"/Get-ImageInfo", L"/ImageFile:" + result.imageFile});
-    if (!processResult.Started()) {
-        result.messages.push_back(L"无法启动 DISM，系统错误 " +
-                                  std::to_wstring(processResult.systemError));
-        return result;
-    }
-    if (!processResult.Succeeded()) {
-        result.messages.push_back(L"DISM 读取镜像失败，退出码 " +
-                                  std::to_wstring(processResult.exitCode));
-        return result;
-    }
-
-    result.images = imaging::ParseDismImageInfo(processResult.output);
-    if (result.images.empty()) {
-        result.messages.emplace_back(L"DISM 已运行，但没有解析到镜像版本。");
-        return result;
+    for (const imaging::WindowsImage& image : result.images) {
+        if (image.architecture == imaging::ImageArchitecture::Unknown) {
+            result.messages.push_back(
+                L"WIMGAPI 元数据中没有可识别的镜像索引 " +
+                std::to_wstring(image.index) + L" 处理器架构。");
+            return result;
+        }
     }
 
     result.messages.push_back(L"已读取 " + std::to_wstring(result.images.size()) +

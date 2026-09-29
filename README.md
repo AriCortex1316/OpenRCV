@@ -1,57 +1,39 @@
 # OpenRCV
 
-OpenRCV is a native Win32 Windows deployment tool designed for WinPE.
-The current milestone implements image selection and configuration validation;
-image application and boot configuration are not connected yet.
+OpenRCV 是一款面向 Windows 预安装环境（WinPE）的系统部署工具。
 
-Implemented:
+它提供图形界面，用于选择 Windows 镜像、目标分区和安装选项，并完成 Windows 系统部署。
 
-- native Unicode Win32 GUI;
-- Install and Settings workspace navigation;
-- ISO selection;
-- ISO attachment through the Windows Virtual Disk API;
-- discovery of `sources\\install.wim` or `sources\\install.esd`;
-- image list retrieval through `dism.exe /Get-ImageInfo /English`;
-- mounted-volume enumeration;
-- unattended-setup XML generation;
-- human-readable first-version settings.
+目前支持 Windows 10 和 Windows 11 官方 ISO 镜像。
 
-## Project layout
+不支持 Ghost、GHO、第三方封装镜像或其他非标准 Windows 安装镜像。
 
-- `src/ui`: Win32 presentation and event handling;
-- `src/imaging`: ISO lifetime management and image metadata parsing;
-- `src/storage`: target-volume discovery;
-- `src/process`: child-process execution and Windows command-line quoting;
-- `src/unattend`: unattended-setup document generation;
-- `src/workflow`: validated deployment plans and image-source orchestration;
-- `include/openrcv`: module interfaces;
-- `tests`: host-safe unit tests for pure logic.
+## 界面截图
 
-## Build and test
+系统重装：
 
-Use a Visual Studio Developer PowerShell:
+![OpenRCV 系统重装界面](docs/images/openrcv_main.png)
 
-```powershell
-cmake -S . -B build/x64 -A x64
-cmake --build build/x64 --config Release
-ctest --test-dir build/x64 -C Release --output-on-failure
-```
+高级设置：
 
-The checked-in Visual Studio project remains available for direct MSBuild use:
+![OpenRCV 高级设置界面](docs/images/openrcv_setting.png)
 
-```powershell
-msbuild OpenRCV.vcxproj /p:Configuration=Release /p:Platform=x64
-msbuild OpenRCV.vcxproj /p:Configuration=Release /p:Platform=Win32
-```
+## 功能
 
-The x64 Release build is the primary target for current WinPE environments.
-The Win32 build remains available for legacy x86 WinPE images.
+- 挂载 Windows 10 / Windows 11 ISO 镜像
+- 读取 WIM / ESD 中的 Windows 版本
+- 选择系统安装分区
+- 选择 EFI / 引导分区
+- 配置无人值守安装选项
+- 格式化目标分区
+- 应用 Windows 镜像
+- 配置 Windows 启动文件
+- 显示部署进度和运行日志
 
-The executable uses the static MSVC runtime (`/MT`) and has no third-party
-runtime dependencies. The x86 build must run in an x86 WinPE image; a standard
-x64 WinPE image should use the x64 build.
+## 支持环境
 
-The ISO path is opened read-only. Some WinPE images do not include a working
-ISO virtual-disk provider even when `virtdisk.dll` is present; the program
-reports that condition instead of falling back to PowerShell or a bundled
-archive library.
+目前主要针对 Windows 11 x64 WinPE 进行开发和测试。
+
+## 项目状态
+
+OpenRCV 目前仍处于开发阶段，部分功能和界面可能继续调整。

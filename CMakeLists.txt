@@ -5,6 +5,8 @@ project(OpenRCV VERSION 0.1.0 LANGUAGES CXX)
 option(OPENRCV_BUILD_TESTS "Build OpenRCV unit tests" ON)
 
 add_library(openrcv_core STATIC
+    src/config/OfflineSettings.cpp
+    src/config/Region.cpp
     src/imaging/IsoMount.cpp
     src/imaging/WindowsImage.cpp
     src/process/ProcessRunner.cpp
@@ -22,6 +24,7 @@ target_compile_definitions(openrcv_core PRIVATE
     NOMINMAX
 )
 target_include_directories(openrcv_core PUBLIC include)
+target_link_libraries(openrcv_core PUBLIC advapi32)
 
 add_executable(OpenRCV WIN32
     src/main.cpp

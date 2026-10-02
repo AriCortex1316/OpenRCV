@@ -51,6 +51,7 @@ enum ControlId : int {
     IDC_PROGRESS,
     IDC_LOG,
     IDC_ADV_DISABLE_UPDATE,
+    IDC_ADV_NOTIFY_UPDATE,
     IDC_ADV_SHOW_EXTENSIONS,
     IDC_ADV_SHOW_THIS_PC,
     IDC_ADV_DISABLE_WIDGETS,
@@ -176,8 +177,9 @@ void SetInstallationControlsEnabled(bool enabled) {
         IDC_NAV_INSTALL, IDC_NAV_ADVANCED, IDC_ISO_PATH, IDC_BROWSE, IDC_IMAGE,
         IDC_VOLUME_LIST, IDC_REFRESH_VOLUMES, IDC_BOOT_VOLUME, IDC_FORMAT_TARGET,
         IDC_SKIP_NETWORK, IDC_LOCAL_ADMIN, IDC_REGION,
-        IDC_ADV_DISABLE_UPDATE, IDC_ADV_SHOW_EXTENSIONS, IDC_ADV_SHOW_THIS_PC,
-        IDC_ADV_DISABLE_WIDGETS, IDC_ADV_DISABLE_FAST_STARTUP, IDC_ADV_DISABLE_UAC,
+        IDC_ADV_DISABLE_UPDATE, IDC_ADV_NOTIFY_UPDATE, IDC_ADV_SHOW_EXTENSIONS,
+        IDC_ADV_SHOW_THIS_PC, IDC_ADV_DISABLE_WIDGETS,
+        IDC_ADV_DISABLE_FAST_STARTUP, IDC_ADV_DISABLE_UAC,
         IDC_ADV_PREVENT_BITLOCKER, IDC_ADV_EXCLUDE_DRIVERS,
     };
     for (const int id : ids) EnableWindow(GetDlgItem(g_app.window, id), enabled);
@@ -705,6 +707,29 @@ void StartInstallation() {
     if (format) request.confirmedFormatTarget = target.root;
     openrcv::config::AdvancedSettings advancedSettings;
     advancedSettings.disableWindowsUpdate = IsChecked(IDC_ADV_DISABLE_UPDATE);
+    advancedSettings.notifyBeforeWindowsUpdateDownload =
+        IsChecked(IDC_ADV_NOTIFY_UPDATE);
+    if (advancedSettings.disableWindowsUpdate &&
+        advancedSettings.notifyBeforeWindowsUpdateDownload) {
+        MessageBoxW(g_app.window,
+            L"“禁用 Windows Update”和“仅通知下载”不能同时启用。",
+            L"OpenRCV", MB_ICONWARNING);
+        return;
+    }
+    if (advancedSettings.notifyBeforeWindowsUpdateDownload) {
+        if (selectedImage.editionClass ==
+            openrcv::imaging::ImageEditionClass::Unknown) {
+            MessageBoxW(g_app.window,
+                L"所选镜像未提供 EDITIONID，无法安全选择 Home 注册表或 Pro+ 本地策略实现。",
+                L"OpenRCV", MB_ICONERROR);
+            return;
+        }
+        advancedSettings.windowsUpdateNotificationMethod =
+            selectedImage.editionClass ==
+                    openrcv::imaging::ImageEditionClass::Home
+                ? openrcv::config::WindowsUpdateNotificationMethod::Registry
+                : openrcv::config::WindowsUpdateNotificationMethod::LocalGroupPolicy;
+    }
     advancedSettings.showFileExtensions = IsChecked(IDC_ADV_SHOW_EXTENSIONS);
     advancedSettings.showThisPcOnDesktop = IsChecked(IDC_ADV_SHOW_THIS_PC);
     advancedSettings.disableWidgets = IsChecked(IDC_ADV_DISABLE_WIDGETS);
@@ -844,6 +869,7 @@ void CreateUi(HWND window) {
         bool checked;
     } advancedSettings[] = {
         {L"禁用 Windows Update（计划任务每周续期暂停）", IDC_ADV_DISABLE_UPDATE, false},
+        {L"Windows Update 仅通知，不自动下载或安装", IDC_ADV_NOTIFY_UPDATE, false},
         {L"显示已知文件类型的扩展名", IDC_ADV_SHOW_EXTENSIONS, true},
         {L"在桌面显示“此电脑”图标", IDC_ADV_SHOW_THIS_PC, true},
         {L"禁用 Widgets", IDC_ADV_DISABLE_WIDGETS, false},
@@ -1109,6 +1135,18 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         case IDC_BROWSE: BrowseIso(); return 0;
         case IDC_REFRESH_VOLUMES: RefreshVolumes(); return 0;
         case IDC_VALIDATE: StartInstallation(); return 0;
+        case IDC_ADV_DISABLE_UPDATE:
+            if (HIWORD(wParam) == BN_CLICKED && IsChecked(IDC_ADV_DISABLE_UPDATE)) {
+                SendMessageW(GetDlgItem(window, IDC_ADV_NOTIFY_UPDATE),
+                             BM_SETCHECK, BST_UNCHECKED, 0);
+            }
+            return 0;
+        case IDC_ADV_NOTIFY_UPDATE:
+            if (HIWORD(wParam) == BN_CLICKED && IsChecked(IDC_ADV_NOTIFY_UPDATE)) {
+                SendMessageW(GetDlgItem(window, IDC_ADV_DISABLE_UPDATE),
+                             BM_SETCHECK, BST_UNCHECKED, 0);
+            }
+            return 0;
         }
         return 0;
     case WM_CLOSE:

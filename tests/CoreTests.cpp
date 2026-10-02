@@ -86,26 +86,48 @@ void ProcessRunnerCancelsRunningProcess() {
 void WimMetadataParserReturnsImagesAndArchitectures() {
     const std::wstring xml =
         L"<WIM><IMAGE INDEX=\"1\"><NAME>Windows 11 Home</NAME>"
-        L"<WINDOWS><ARCH>0</ARCH></WINDOWS></IMAGE>"
+        L"<WINDOWS><ARCH>0</ARCH><EDITIONID>Core</EDITIONID></WINDOWS></IMAGE>"
         L"<IMAGE INDEX=\"2\"><NAME>Windows 11 Pro &amp; Workstation</NAME>"
-        L"<WINDOWS><ARCH>9</ARCH></WINDOWS></IMAGE>"
+        L"<WINDOWS><ARCH>9</ARCH><EDITIONID>Professional</EDITIONID></WINDOWS></IMAGE>"
         L"<IMAGE INDEX=\"3\"><NAME>Windows 11 ARM64</NAME>"
-        L"<WINDOWS><ARCH>12</ARCH></WINDOWS></IMAGE></WIM>";
+        L"<WINDOWS><ARCH>12</ARCH><EDITIONID>Enterprise</EDITIONID></WINDOWS></IMAGE></WIM>";
     const std::vector<openrcv::imaging::WindowsImage> images =
         openrcv::imaging::ParseWimImageInfoXml(xml);
     Expect(images.size() == 3, L"WimMetadataParserReturnsThreeImages");
     if (images.size() == 3) {
         Expect(images[0].index == 1 && images[0].name == L"Windows 11 Home" &&
-                   images[0].architecture == openrcv::imaging::ImageArchitecture::X86,
+                   images[0].architecture == openrcv::imaging::ImageArchitecture::X86 &&
+                   images[0].editionClass ==
+                       openrcv::imaging::ImageEditionClass::Home,
                L"WimMetadataParserReturnsX86Image");
         Expect(images[1].index == 2 &&
                    images[1].name == L"Windows 11 Pro & Workstation" &&
-                   images[1].architecture == openrcv::imaging::ImageArchitecture::Amd64,
+                   images[1].architecture == openrcv::imaging::ImageArchitecture::Amd64 &&
+                   images[1].editionClass ==
+                       openrcv::imaging::ImageEditionClass::ProOrHigher,
                L"WimMetadataParserReturnsAmd64ImageAndDecodesName");
         Expect(images[2].index == 3 &&
                    images[2].architecture == openrcv::imaging::ImageArchitecture::Arm64,
                L"WimMetadataParserReturnsArm64Image");
     }
+}
+
+bool ContainsUtf16Text(const std::vector<std::uint8_t>& bytes,
+                       const std::wstring& text) {
+    if (text.empty()) return true;
+    for (std::size_t offset = 0; offset + text.size() * 2 <= bytes.size(); ++offset) {
+        bool matches = true;
+        for (std::size_t index = 0; index < text.size(); ++index) {
+            const std::uint16_t character = static_cast<std::uint16_t>(
+                bytes[offset + index * 2] | (bytes[offset + index * 2 + 1] << 8));
+            if (character != static_cast<std::uint16_t>(text[index])) {
+                matches = false;
+                break;
+            }
+        }
+        if (matches) return true;
+    }
+    return false;
 }
 
 void UnattendBuilderCreatesLocalAdmin() {
@@ -294,6 +316,46 @@ void OfflineSettingsMapAdvancedOptionsToRegistry() {
            L"OfflineSettingsBuildsRecurringWindowsUpdatePauseTask");
 }
 
+void OfflineSettingsConfiguresUpdateNotificationByEdition() {
+    openrcv::config::AdvancedSettings homeSettings;
+    homeSettings.notifyBeforeWindowsUpdateDownload = true;
+    homeSettings.windowsUpdateNotificationMethod =
+        openrcv::config::WindowsUpdateNotificationMethod::Registry;
+    const auto homeChanges =
+        openrcv::config::BuildOfflineRegistryChanges(homeSettings, 1);
+    Expect(homeChanges.size() == 2 && ContainsRegistryChange(homeChanges,
+               openrcv::config::OfflineHive::Software,
+               L"Policies\\Microsoft\\Windows\\WindowsUpdate\\AU",
+               L"NoAutoUpdate", 0) &&
+               ContainsRegistryChange(homeChanges,
+               openrcv::config::OfflineHive::Software,
+               L"Policies\\Microsoft\\Windows\\WindowsUpdate\\AU",
+               L"AUOptions", 2),
+           L"OfflineSettingsUsesRegistryNotificationForHome");
+
+    openrcv::config::AdvancedSettings proSettings = homeSettings;
+    proSettings.windowsUpdateNotificationMethod =
+        openrcv::config::WindowsUpdateNotificationMethod::LocalGroupPolicy;
+    Expect(openrcv::config::BuildOfflineRegistryChanges(proSettings, 1).empty(),
+           L"OfflineSettingsDoesNotWriteProPolicyDirectlyToRegistry");
+
+    const auto policy =
+        openrcv::config::BuildWindowsUpdateNotificationPolicyFile();
+    const bool hasHeader = policy.size() >= 8 && policy[0] == 'P' &&
+        policy[1] == 'R' && policy[2] == 'e' && policy[3] == 'g' &&
+        policy[4] == 1 && policy[5] == 0 && policy[6] == 0 && policy[7] == 0;
+    const bool hasDwordTwo = policy.size() >= 6 &&
+        policy[policy.size() - 6] == 2 && policy[policy.size() - 5] == 0 &&
+        policy[policy.size() - 4] == 0 && policy[policy.size() - 3] == 0 &&
+        policy[policy.size() - 2] == ']' && policy.back() == 0;
+    Expect(hasHeader && hasDwordTwo &&
+               ContainsUtf16Text(policy,
+                   L"Software\\Policies\\Microsoft\\Windows\\WindowsUpdate\\AU") &&
+               ContainsUtf16Text(policy, L"NoAutoUpdate") &&
+               ContainsUtf16Text(policy, L"AUOptions"),
+           L"OfflineSettingsBuildsWindowsUpdateLocalPolicy");
+}
+
 void DeploymentPlanRejectsUnconfirmedFormat() {
     openrcv::workflow::DeploymentRequest request;
     request.imageFile = L"D:\\sources\\install.wim";
@@ -412,6 +474,7 @@ int wmain() {
     UnattendBuilderBlocksNetworkOnlyDuringSkippedOobe();
     UnattendBuilderInstallsWindowsUpdatePauseTask();
     OfflineSettingsMapAdvancedOptionsToRegistry();
+    OfflineSettingsConfiguresUpdateNotificationByEdition();
     DeploymentPlanRejectsUnconfirmedFormat();
     DeploymentPlanUsesDiskPartForConfirmedFormat();
     DeploymentPlanCreatesApplyAndBootOperations();

@@ -29,6 +29,8 @@ OpenRCV 是一款面向 Windows 预安装环境（WinPE）的系统部署工具�
 - 应用 Windows 镜像
 - 配置 Windows 启动文件
 - 显示部署进度和运行日志
+- 将 Windows Update 配置为仅通知下载和安装（Home 使用离线注册表，Pro
+  及以上使用本地计算机策略）
 
 ## 支持环境
 

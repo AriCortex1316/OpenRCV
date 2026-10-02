@@ -6,8 +6,16 @@
 
 namespace openrcv::config {
 
+enum class WindowsUpdateNotificationMethod {
+    Registry,
+    LocalGroupPolicy,
+};
+
 struct AdvancedSettings {
     bool disableWindowsUpdate{};
+    bool notifyBeforeWindowsUpdateDownload{};
+    WindowsUpdateNotificationMethod windowsUpdateNotificationMethod{
+        WindowsUpdateNotificationMethod::Registry};
     bool showFileExtensions{};
     bool showThisPcOnDesktop{};
     bool disableWidgets{};
@@ -41,6 +49,8 @@ std::vector<RegistryChange> BuildOfflineRegistryChanges(
     const AdvancedSettings& settings, unsigned long currentControlSet);
 
 std::wstring BuildPauseWindowsUpdateTaskXml();
+
+std::vector<std::uint8_t> BuildWindowsUpdateNotificationPolicyFile();
 
 OfflineSettingsResult ApplyOfflineSettings(
     const std::wstring& targetRoot, const AdvancedSettings& settings);

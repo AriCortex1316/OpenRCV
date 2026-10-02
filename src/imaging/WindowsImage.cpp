@@ -198,6 +198,24 @@ ImageArchitecture ParseArchitecture(std::wstring_view value) {
 
 } // namespace
 
+ImageEditionClass ClassifyEditionId(std::wstring_view editionId) {
+    std::wstring normalized = Trim(std::wstring(editionId));
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                   [](wchar_t character) {
+                       return static_cast<wchar_t>(std::towupper(character));
+                   });
+    if (normalized.empty()) return ImageEditionClass::Unknown;
+    if (normalized == L"CORE" || normalized == L"COREN" ||
+        normalized == L"CORESINGLELANGUAGE" ||
+        normalized == L"CORECOUNTRYSPECIFIC" ||
+        normalized == L"CORECONNECTED" || normalized == L"CORECONNECTEDN" ||
+        normalized == L"CORECONNECTEDSINGLELANGUAGE" ||
+        normalized == L"CORECONNECTEDCOUNTRYSPECIFIC") {
+        return ImageEditionClass::Home;
+    }
+    return ImageEditionClass::ProOrHigher;
+}
+
 std::vector<WindowsImage> ParseWimImageInfoXml(std::wstring_view xml) {
     std::vector<WindowsImage> images;
     std::size_t cursor = 0;
@@ -222,6 +240,8 @@ std::vector<WindowsImage> ParseWimImageInfoXml(std::wstring_view xml) {
         image.name = DecodeXmlText(ElementText(body, L"NAME"));
         const std::wstring_view windows = ElementText(body, L"WINDOWS");
         image.architecture = ParseArchitecture(ElementText(windows, L"ARCH"));
+        image.editionId = DecodeXmlText(ElementText(windows, L"EDITIONID"));
+        image.editionClass = ClassifyEditionId(image.editionId);
         if (image.index > 0 && !image.name.empty()) images.push_back(std::move(image));
 
         cursor = closing + 8;

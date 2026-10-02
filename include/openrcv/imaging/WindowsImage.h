@@ -14,12 +14,21 @@ enum class ImageArchitecture {
     Arm64,
 };
 
+enum class ImageEditionClass {
+    Unknown,
+    Home,
+    ProOrHigher,
+};
+
 struct WindowsImage {
     int index{};
     std::wstring name;
     ImageArchitecture architecture{ImageArchitecture::Unknown};
+    std::wstring editionId;
+    ImageEditionClass editionClass{ImageEditionClass::Unknown};
 };
 
+ImageEditionClass ClassifyEditionId(std::wstring_view editionId);
 std::vector<WindowsImage> ParseWimImageInfoXml(std::wstring_view xml);
 bool LoadWindowsImages(const std::wstring& imageFile,
                        std::vector<WindowsImage>& images,

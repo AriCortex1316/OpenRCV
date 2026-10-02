@@ -2,7 +2,10 @@
 
 #include "openrcv/config/OfflineSettings.h"
 
+#include <cstdint>
+#include <iterator>
 #include <utility>
+#include <vector>
 
 namespace openrcv::config {
 namespace {
@@ -186,10 +189,134 @@ OfflineSettingsResult WritePauseWindowsUpdateTask(const std::wstring& targetRoot
                           BuildPauseWindowsUpdateTaskXml());
 }
 
+void AppendDword(std::vector<std::uint8_t>& bytes, std::uint32_t value) {
+    for (int shift = 0; shift < 32; shift += 8) {
+        bytes.push_back(static_cast<std::uint8_t>(value >> shift));
+    }
+}
+
+void AppendUtf16(std::vector<std::uint8_t>& bytes, std::wstring_view text,
+                 bool nullTerminate = false) {
+    for (const wchar_t character : text) {
+        const auto value = static_cast<std::uint16_t>(character);
+        bytes.push_back(static_cast<std::uint8_t>(value));
+        bytes.push_back(static_cast<std::uint8_t>(value >> 8));
+    }
+    if (nullTerminate) {
+        bytes.push_back(0);
+        bytes.push_back(0);
+    }
+}
+
+void AppendRegistryPolicyDword(std::vector<std::uint8_t>& bytes,
+                               std::wstring_view key,
+                               std::wstring_view valueName,
+                               std::uint32_t value) {
+    AppendUtf16(bytes, L"[");
+    AppendUtf16(bytes, key, true);
+    AppendUtf16(bytes, L";");
+    AppendUtf16(bytes, valueName, true);
+    AppendUtf16(bytes, L";");
+    AppendDword(bytes, REG_DWORD);
+    AppendUtf16(bytes, L";");
+    AppendDword(bytes, sizeof(value));
+    AppendUtf16(bytes, L";");
+    AppendDword(bytes, value);
+    AppendUtf16(bytes, L"]");
+}
+
+OfflineSettingsResult WriteAllBytes(const std::wstring& path,
+                                    const std::vector<std::uint8_t>& bytes) {
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr,
+        CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        return {false, L"无法创建文件 " + path + L"，系统错误 " +
+                       std::to_wstring(GetLastError())};
+    }
+    DWORD written = 0;
+    const BOOL succeeded = WriteFile(file, bytes.data(),
+        static_cast<DWORD>(bytes.size()), &written, nullptr);
+    const DWORD error = !succeeded ? GetLastError()
+        : written != bytes.size() ? ERROR_WRITE_FAULT : ERROR_SUCCESS;
+    CloseHandle(file);
+    if (error != ERROR_SUCCESS) {
+        return {false, L"无法写入文件 " + path + L"，系统错误 " +
+                       std::to_wstring(error)};
+    }
+    return {true, {}};
+}
+
+OfflineSettingsResult WriteWindowsUpdateNotificationPolicy(
+    const std::wstring& targetRoot) {
+    const std::wstring groupPolicyDirectory =
+        JoinPath(targetRoot, L"Windows\\System32\\GroupPolicy");
+    const std::wstring machineDirectory = groupPolicyDirectory + L"\\Machine";
+    for (const auto& directory : {groupPolicyDirectory, machineDirectory}) {
+        if (!CreateDirectoryW(directory.c_str(), nullptr) &&
+            GetLastError() != ERROR_ALREADY_EXISTS) {
+            return {false, L"无法创建目录 " + directory + L"，系统错误 " +
+                           std::to_wstring(GetLastError())};
+        }
+    }
+
+    const std::wstring policyPath = machineDirectory + L"\\Registry.pol";
+    std::vector<std::uint8_t> policy = BuildWindowsUpdateNotificationPolicyFile();
+    HANDLE existing = CreateFileW(policyPath.c_str(), GENERIC_READ, FILE_SHARE_READ,
+        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (existing != INVALID_HANDLE_VALUE) {
+        const DWORD size = GetFileSize(existing, nullptr);
+        if (size == INVALID_FILE_SIZE || size < 8) {
+            CloseHandle(existing);
+            return {false, L"现有本地策略文件无效，未覆盖：" + policyPath};
+        }
+        std::vector<std::uint8_t> oldPolicy(size);
+        DWORD read = 0;
+        const BOOL readSucceeded = ReadFile(existing, oldPolicy.data(), size, &read, nullptr);
+        CloseHandle(existing);
+        if (!readSucceeded || read != size || oldPolicy[0] != 'P' ||
+            oldPolicy[1] != 'R' || oldPolicy[2] != 'e' || oldPolicy[3] != 'g' ||
+            oldPolicy[4] != 1 || oldPolicy[5] != 0 || oldPolicy[6] != 0 ||
+            oldPolicy[7] != 0) {
+            return {false, L"现有本地策略文件无效，未覆盖：" + policyPath};
+        }
+        oldPolicy.insert(oldPolicy.end(), policy.begin() + 8, policy.end());
+        policy = std::move(oldPolicy);
+    }
+    auto result = WriteAllBytes(policyPath, policy);
+    if (!result.success) return result;
+
+    const std::wstring gptPath = groupPolicyDirectory + L"\\gpt.ini";
+    constexpr wchar_t kRegistryExtension[] =
+        L"[{35378EAC-683F-11D2-A89A-00C04FBBCFA2}"
+        L"{D02B1F72-3407-48AE-BA88-E8213C6761F1}]";
+    wchar_t extensions[4096]{};
+    GetPrivateProfileStringW(L"General", L"gPCMachineExtensionNames", L"",
+        extensions, static_cast<DWORD>(std::size(extensions)), gptPath.c_str());
+    std::wstring extensionList = extensions;
+    if (extensionList.find(L"{35378EAC-683F-11D2-A89A-00C04FBBCFA2}") ==
+        std::wstring::npos) {
+        extensionList += kRegistryExtension;
+    }
+    const UINT version = GetPrivateProfileIntW(L"General", L"Version", 0,
+                                                gptPath.c_str());
+    const UINT machineVersion = (version + 1) & 0xffff;
+    const std::wstring nextVersion =
+        std::to_wstring((version & 0xffff0000) | (machineVersion ? machineVersion : 1));
+    if (!WritePrivateProfileStringW(L"General", L"gPCMachineExtensionNames",
+            extensionList.c_str(), gptPath.c_str()) ||
+        !WritePrivateProfileStringW(L"General", L"Version",
+            nextVersion.c_str(), gptPath.c_str())) {
+        return {false, L"无法更新本地策略元数据，系统错误 " +
+                       std::to_wstring(GetLastError())};
+    }
+    return {true, {}};
+}
+
 } // namespace
 
 bool AdvancedSettings::AnyEnabled() const noexcept {
-    return disableWindowsUpdate || showFileExtensions || showThisPcOnDesktop ||
+    return disableWindowsUpdate || notifyBeforeWindowsUpdateDownload ||
+           showFileExtensions || showThisPcOnDesktop ||
            disableWidgets || disableFastStartup || disableUac ||
            preventBitLocker || excludeWindowsUpdateDrivers;
 }
@@ -238,7 +365,26 @@ std::vector<RegistryChange> BuildOfflineRegistryChanges(
             L"Policies\\Microsoft\\Windows\\WindowsUpdate",
             L"ExcludeWUDriversInQualityUpdate", 1});
     }
+    if (settings.notifyBeforeWindowsUpdateDownload &&
+        settings.windowsUpdateNotificationMethod ==
+            WindowsUpdateNotificationMethod::Registry) {
+        changes.push_back({OfflineHive::Software,
+            L"Policies\\Microsoft\\Windows\\WindowsUpdate\\AU",
+            L"NoAutoUpdate", 0});
+        changes.push_back({OfflineHive::Software,
+            L"Policies\\Microsoft\\Windows\\WindowsUpdate\\AU",
+            L"AUOptions", 2});
+    }
     return changes;
+}
+
+std::vector<std::uint8_t> BuildWindowsUpdateNotificationPolicyFile() {
+    std::vector<std::uint8_t> bytes{'P', 'R', 'e', 'g', 1, 0, 0, 0};
+    constexpr wchar_t kAutomaticUpdateKey[] =
+        L"Software\\Policies\\Microsoft\\Windows\\WindowsUpdate\\AU";
+    AppendRegistryPolicyDword(bytes, kAutomaticUpdateKey, L"NoAutoUpdate", 0);
+    AppendRegistryPolicyDword(bytes, kAutomaticUpdateKey, L"AUOptions", 2);
+    return bytes;
 }
 
 std::wstring BuildPauseWindowsUpdateTaskXml() {
@@ -351,6 +497,12 @@ OfflineSettingsResult ApplyOfflineSettings(
     if (settings.disableWindowsUpdate) {
         const auto taskResult = WritePauseWindowsUpdateTask(targetRoot);
         if (!taskResult.success) return taskResult;
+    }
+    if (settings.notifyBeforeWindowsUpdateDownload &&
+        settings.windowsUpdateNotificationMethod ==
+            WindowsUpdateNotificationMethod::LocalGroupPolicy) {
+        const auto policyResult = WriteWindowsUpdateNotificationPolicy(targetRoot);
+        if (!policyResult.success) return policyResult;
     }
     return {true, {}};
 }

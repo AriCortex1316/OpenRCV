@@ -1,6 +1,6 @@
 # Development progress
 
-Last updated: 2026-09-29
+Last updated: 2026-09-30
 
 ## Current objective
 
@@ -72,6 +72,16 @@ and a central start-install button.
   accepted. The user must click the target partition so it is actively blue,
   then click Start Installation directly; otherwise the app displays
   `请选择分区。` and does not proceed.
+- Added an independent advanced option that configures Windows Update to notify
+  before downloading and installing. WIM metadata parsing now reads
+  `WINDOWS/EDITIONID`: Home editions write Microsoft's documented
+  `NoAutoUpdate=0` and `AUOptions=2` values to the offline SOFTWARE hive, while
+  Pro and higher editions persist the same settings in the local computer
+  policy `Machine/Registry.pol` and update `gpt.ini`. Existing valid policy
+  records are preserved, unknown editions are rejected instead of guessed, and
+  the option is mutually exclusive with the existing update-pause feature.
+- Added host-safe tests for edition classification, the Home registry mapping,
+  and the Pro-or-higher `Registry.pol` binary payload.
 
 ## Verified builds
 
@@ -81,6 +91,9 @@ and a central start-install button.
 - CTest: all current tests passed.
 - Windows Update pause-task generation and unattend registration have unit-test
   coverage; the UTF-16 encoding fix builds successfully on x64 and Win32.
+- The final x64/Win32 builds and CTest pass for the Windows Update notification
+  feature succeeded after the policy payload was tightened to include
+  `NoAutoUpdate=0` alongside `AUOptions=2`.
 
 Generated executables are under `build/` and are excluded from Git.
 

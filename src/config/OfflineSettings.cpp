@@ -315,7 +315,8 @@ OfflineSettingsResult WriteWindowsUpdateNotificationPolicy(
 } // namespace
 
 bool AdvancedSettings::AnyEnabled() const noexcept {
-    return disableWindowsUpdate || notifyBeforeWindowsUpdateDownload ||
+    return skipWindows11HardwareChecks || disableWindowsUpdate ||
+           notifyBeforeWindowsUpdateDownload ||
            showFileExtensions || showThisPcOnDesktop ||
            disableWidgets || disableFastStartup || disableUac ||
            preventBitLocker || excludeWindowsUpdateDrivers;
@@ -324,6 +325,13 @@ bool AdvancedSettings::AnyEnabled() const noexcept {
 std::vector<RegistryChange> BuildOfflineRegistryChanges(
     const AdvancedSettings& settings, unsigned long currentControlSet) {
     std::vector<RegistryChange> changes;
+    if (settings.skipWindows11HardwareChecks) {
+        for (const wchar_t* valueName : {L"BypassTPMCheck", L"BypassSecureBootCheck",
+                                         L"BypassRAMCheck", L"BypassCPUCheck",
+                                         L"BypassStorageCheck"}) {
+            changes.push_back({OfflineHive::System, L"Setup\\LabConfig", valueName, 1});
+        }
+    }
     if (settings.showFileExtensions) {
         changes.push_back({OfflineHive::DefaultUser,
             L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced",
@@ -443,7 +451,8 @@ OfflineSettingsResult ApplyOfflineSettings(
 
     ScopedLoadedHive system;
     DWORD currentControlSet = 1;
-    if (settings.disableFastStartup || settings.preventBitLocker) {
+    if (settings.skipWindows11HardwareChecks || settings.disableFastStartup ||
+        settings.preventBitLocker) {
         const LONG systemStatus = system.Load(
             JoinPath(targetRoot, L"Windows\\System32\\config\\SYSTEM"), L"SYSTEM");
         if (systemStatus != ERROR_SUCCESS) {

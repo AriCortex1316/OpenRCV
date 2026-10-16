@@ -12,6 +12,7 @@ enum class WindowsUpdateNotificationMethod {
 };
 
 struct AdvancedSettings {
+    bool skipWindows11HardwareChecks{};
     bool disableWindowsUpdate{};
     bool notifyBeforeWindowsUpdateDownload{};
     WindowsUpdateNotificationMethod windowsUpdateNotificationMethod{

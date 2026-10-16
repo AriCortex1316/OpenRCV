@@ -10,15 +10,15 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "openrcv/config/OfflineSettings.h"
 #include "openrcv/config/Region.h"
 #include "openrcv/storage/VolumeEnumerator.h"
-#include "openrcv/process/ProcessRunner.h"
 #include "openrcv/ui/Application.h"
 #include "openrcv/unattend/UnattendBuilder.h"
-#include "openrcv/workflow/DeploymentPlan.h"
+#include "openrcv/workflow/DeploymentRunner.h"
 #include "openrcv/workflow/ImageSourceService.h"
 
 namespace {
@@ -50,6 +50,7 @@ enum ControlId : int {
     IDC_VALIDATE,
     IDC_PROGRESS,
     IDC_LOG,
+    IDC_ADV_SKIP_WIN11_HARDWARE,
     IDC_ADV_DISABLE_UPDATE,
     IDC_ADV_NOTIFY_UPDATE,
     IDC_ADV_SHOW_EXTENSIONS,
@@ -93,20 +94,6 @@ AppState g_app;
 constexpr UINT WM_INSTALL_LOG = WM_APP + 1;
 constexpr UINT WM_INSTALL_PROGRESS = WM_APP + 2;
 constexpr UINT WM_INSTALL_COMPLETE = WM_APP + 3;
-
-struct InstallationTask {
-    openrcv::workflow::DeploymentPlan plan;
-    openrcv::unattend::UnattendOptions unattendOptions;
-    openrcv::config::AdvancedSettings advancedSettings;
-    std::wstring targetRoot;
-    std::wstring temporaryBootRoot;
-};
-
-struct InstallationResult {
-    bool succeeded{};
-    bool cancelled{};
-    std::wstring temporaryBootRoot;
-};
 
 HFONT CreateUiFont(HWND window, int pointSize, int weight) {
     HDC dc = GetDC(window);
@@ -177,7 +164,7 @@ void SetInstallationControlsEnabled(bool enabled) {
         IDC_NAV_INSTALL, IDC_NAV_ADVANCED, IDC_ISO_PATH, IDC_BROWSE, IDC_IMAGE,
         IDC_VOLUME_LIST, IDC_REFRESH_VOLUMES, IDC_BOOT_VOLUME, IDC_FORMAT_TARGET,
         IDC_SKIP_NETWORK, IDC_LOCAL_ADMIN, IDC_REGION,
-        IDC_ADV_DISABLE_UPDATE, IDC_ADV_NOTIFY_UPDATE, IDC_ADV_SHOW_EXTENSIONS,
+        IDC_ADV_SKIP_WIN11_HARDWARE, IDC_ADV_DISABLE_UPDATE, IDC_ADV_NOTIFY_UPDATE, IDC_ADV_SHOW_EXTENSIONS,
         IDC_ADV_SHOW_THIS_PC, IDC_ADV_DISABLE_WIDGETS,
         IDC_ADV_DISABLE_FAST_STARTUP, IDC_ADV_DISABLE_UAC,
         IDC_ADV_PREVENT_BITLOCKER, IDC_ADV_EXCLUDE_DRIVERS,
@@ -246,7 +233,7 @@ void RecommendBootVolume(int targetIndex) {
 }
 
 bool IsAdvancedControl(int id) {
-    return id >= IDC_ADV_DISABLE_UPDATE && id <= IDC_ADV_EXCLUDE_DRIVERS;
+    return id >= IDC_ADV_SKIP_WIN11_HARDWARE && id <= IDC_ADV_EXCLUDE_DRIVERS;
 }
 
 BOOL CALLBACK SetPageVisibility(HWND control, LPARAM page) {
@@ -349,30 +336,6 @@ void BrowseIso() {
     }
 }
 
-bool WriteUnattendFile(const std::wstring& path, const std::wstring& xml) {
-    const std::size_t slash = path.find_last_of(L"\\/");
-    if (slash != std::wstring::npos) {
-        const std::wstring directory = path.substr(0, slash);
-        if (!CreateDirectoryW(directory.c_str(), nullptr) &&
-            GetLastError() != ERROR_ALREADY_EXISTS) return false;
-    }
-    const int byteCount = WideCharToMultiByte(CP_UTF8, 0, xml.data(),
-        static_cast<int>(xml.size()), nullptr, 0, nullptr, nullptr);
-    if (byteCount <= 0) return false;
-    std::string utf8(static_cast<std::size_t>(byteCount), '\0');
-    WideCharToMultiByte(CP_UTF8, 0, xml.data(), static_cast<int>(xml.size()),
-                        utf8.data(), byteCount, nullptr, nullptr);
-    HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr,
-        CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (file == INVALID_HANDLE_VALUE) return false;
-    DWORD written{};
-    const bool success = WriteFile(file, utf8.data(),
-        static_cast<DWORD>(utf8.size()), &written, nullptr) != FALSE &&
-        written == utf8.size();
-    CloseHandle(file);
-    return success;
-}
-
 bool PathIsOnDrive(const std::wstring& path, const std::wstring& driveRoot) {
     return path.size() >= 2 && driveRoot.size() >= 2 && path[1] == L':' &&
         driveRoot[1] == L':' &&
@@ -405,193 +368,19 @@ std::wstring FormatTargetSafetyError(const std::wstring& targetRoot) {
     return {};
 }
 
-bool CreateFormatScript(const std::wstring& targetRoot,
-                        std::wstring& scriptPath, std::wstring& error) {
-    wchar_t temporaryDirectory[MAX_PATH]{};
-    const DWORD directoryLength = GetTempPathW(
-        static_cast<DWORD>(std::size(temporaryDirectory)), temporaryDirectory);
-    if (directoryLength == 0 || directoryLength >= std::size(temporaryDirectory)) {
-        error = L"无法取得 WinPE 临时目录，系统错误 " +
-                std::to_wstring(GetLastError());
-        return false;
+void RunInstallation(openrcv::workflow::DeploymentTask task) {
+    openrcv::workflow::DeploymentCallbacks callbacks;
+    callbacks.log = PublishInstallationLog;
+    callbacks.progress = [](int progress) {
+        PostMessageW(g_app.window, WM_INSTALL_PROGRESS, progress, 0);
+    };
+    auto* result = new openrcv::workflow::DeploymentResult(
+        openrcv::workflow::RunDeployment(
+            std::move(task), g_app.cancellationRequested, callbacks));
+    if (!PostMessageW(g_app.window, WM_INSTALL_COMPLETE, 0,
+                      reinterpret_cast<LPARAM>(result))) {
+        delete result;
     }
-    wchar_t temporaryFile[MAX_PATH]{};
-    if (!GetTempFileNameW(temporaryDirectory, L"orc", 0, temporaryFile)) {
-        error = L"无法创建 DiskPart 临时脚本，系统错误 " +
-                std::to_wstring(GetLastError());
-        return false;
-    }
-    scriptPath = temporaryFile;
-    const std::string drive(1, static_cast<char>(targetRoot[0]));
-    const std::string script =
-        "select volume " + drive + "\r\n"
-        "format fs=ntfs quick label=Windows override\r\n"
-        "exit\r\n";
-    HANDLE file = CreateFileW(scriptPath.c_str(), GENERIC_WRITE, 0, nullptr,
-        CREATE_ALWAYS, FILE_ATTRIBUTE_TEMPORARY, nullptr);
-    if (file == INVALID_HANDLE_VALUE) {
-        error = L"无法写入 DiskPart 临时脚本，系统错误 " +
-                std::to_wstring(GetLastError());
-        DeleteFileW(scriptPath.c_str());
-        scriptPath.clear();
-        return false;
-    }
-    DWORD written = 0;
-    const bool success = WriteFile(file, script.data(),
-        static_cast<DWORD>(script.size()), &written, nullptr) != FALSE &&
-        written == script.size();
-    const DWORD writeError = success ? ERROR_SUCCESS : GetLastError();
-    CloseHandle(file);
-    if (!success) {
-        error = L"无法写入 DiskPart 临时脚本，系统错误 " +
-                std::to_wstring(writeError);
-        DeleteFileW(scriptPath.c_str());
-        scriptPath.clear();
-    }
-    return success;
-}
-
-void RunInstallation(InstallationTask task) {
-    bool succeeded = true;
-    bool cancelled = false;
-
-    for (const auto& operation : task.plan.operations) {
-        if (g_app.cancellationRequested.load(std::memory_order_relaxed)) {
-            cancelled = true;
-            succeeded = false;
-            break;
-        }
-
-        PublishInstallationLog(L"开始：" + operation.description);
-        if (operation.type == openrcv::workflow::DeploymentOperationType::WriteUnattend) {
-            if (operation.arguments.size() < 2 ||
-                !WriteUnattendFile(operation.arguments[0],
-                    openrcv::unattend::BuildUnattendXml(task.unattendOptions)) ||
-                !WriteUnattendFile(operation.arguments[1],
-                    openrcv::unattend::BuildOobeXml(task.unattendOptions.region))) {
-                PublishInstallationLog(
-                    L"失败：无法写入无人值守或 OOBE 配置，系统错误 " +
-                    std::to_wstring(GetLastError()));
-                succeeded = false;
-                break;
-            }
-            const auto regionResult = openrcv::config::ApplyOfflineDeviceRegion(
-                task.targetRoot, task.unattendOptions.region.geoId);
-            if (!regionResult.success) {
-                PublishInstallationLog(L"失败：" + regionResult.error);
-                succeeded = false;
-                break;
-            }
-            PublishInstallationLog(
-                L"完成：无人值守、OOBE 和离线设备区域配置已写入。");
-            continue;
-        }
-        if (operation.type ==
-            openrcv::workflow::DeploymentOperationType::ConfigureOfflineSettings) {
-            const auto settingsResult = openrcv::config::ApplyOfflineSettings(
-                operation.arguments.front(), task.advancedSettings);
-            if (!settingsResult.success) {
-                PublishInstallationLog(L"失败：" + settingsResult.error);
-                succeeded = false;
-                break;
-            }
-            PublishInstallationLog(L"完成：高级设置已写入离线 Windows。");
-            continue;
-        }
-
-        std::wstring executable = operation.executable;
-        std::vector<std::wstring> arguments = operation.arguments;
-        std::wstring formatScript;
-        if (operation.type == openrcv::workflow::DeploymentOperationType::FormatTarget) {
-            std::wstring scriptError;
-            if (!CreateFormatScript(operation.arguments.front(),
-                                    formatScript, scriptError)) {
-                PublishInstallationLog(L"失败：" + scriptError);
-                succeeded = false;
-                break;
-            }
-            arguments = {L"/s", formatScript};
-        }
-
-        std::wstring command = executable;
-        for (const auto& argument : arguments) {
-            command += L" " + openrcv::process::QuoteCommandLineArgument(argument);
-        }
-        PublishInstallationLog(L"执行：" + command);
-
-        std::wstring pendingOutput;
-        auto flushOutput = [&](bool flushAll) {
-            for (;;) {
-                const std::size_t end = pendingOutput.find_first_of(L"\r\n");
-                if (end == std::wstring::npos) break;
-                if (end != 0) {
-                    const std::wstring line = pendingOutput.substr(0, end);
-                    PublishInstallationLog(line);
-                    if (operation.type == openrcv::workflow::DeploymentOperationType::ApplyImage) {
-                        const auto progress =
-                            openrcv::process::ParseDismProgressPercentage(line);
-                        if (progress) PostMessageW(g_app.window, WM_INSTALL_PROGRESS,
-                                                   *progress, 0);
-                    }
-                }
-                std::size_t next = end + 1;
-                while (next < pendingOutput.size() &&
-                       (pendingOutput[next] == L'\r' || pendingOutput[next] == L'\n')) {
-                    ++next;
-                }
-                pendingOutput.erase(0, next);
-            }
-            if (flushAll && !pendingOutput.empty()) {
-                PublishInstallationLog(pendingOutput);
-                if (operation.type == openrcv::workflow::DeploymentOperationType::ApplyImage) {
-                    const auto progress =
-                        openrcv::process::ParseDismProgressPercentage(pendingOutput);
-                    if (progress) PostMessageW(g_app.window, WM_INSTALL_PROGRESS,
-                                               *progress, 0);
-                }
-                pendingOutput.clear();
-            }
-        };
-
-        openrcv::process::ProcessRunOptions runOptions;
-        runOptions.outputCallback = [&](std::wstring_view chunk) {
-            pendingOutput.append(chunk.data(), chunk.size());
-            flushOutput(false);
-        };
-        if (operation.type != openrcv::workflow::DeploymentOperationType::FormatTarget) {
-            runOptions.cancellationRequested = &g_app.cancellationRequested;
-        }
-        const auto result = openrcv::process::RunHidden(
-            executable, arguments, runOptions);
-        if (!formatScript.empty()) DeleteFileW(formatScript.c_str());
-        flushOutput(true);
-        if (result.cancelled) {
-            PublishInstallationLog(L"命令已取消。");
-            cancelled = true;
-            succeeded = false;
-            break;
-        }
-        if (!result.Succeeded()) {
-            PublishInstallationLog(
-                L"命令失败，退出码 " + std::to_wstring(result.exitCode) +
-                L"，系统错误 " + std::to_wstring(result.systemError));
-            succeeded = false;
-            break;
-        }
-        PublishInstallationLog(L"完成，退出码 0。");
-    }
-
-    if (task.temporaryBootRoot.empty() == false) {
-        openrcv::storage::RemoveTemporaryMount(task.temporaryBootRoot);
-        PublishInstallationLog(
-            L"已移除引导分区临时盘符 " + task.temporaryBootRoot);
-    }
-    if (cancelled) PublishInstallationLog(L"安装已由用户取消。");
-
-    auto* result = new InstallationResult{
-        succeeded, cancelled, std::move(task.temporaryBootRoot)};
-    PostMessageW(g_app.window, WM_INSTALL_COMPLETE, 0,
-                 reinterpret_cast<LPARAM>(result));
 }
 
 void StartInstallation() {
@@ -670,42 +459,13 @@ void StartInstallation() {
     openrcv::unattend::UnattendOptions selectedUnattendOptions;
     if (!SetUnattendArchitecture(selectedUnattendOptions,
                                   selectedImage.architecture)) {
-        MessageBoxW(g_app.window, L"DISM 没有返回所选镜像的处理器架构。",
+        MessageBoxW(g_app.window, L"WIMGAPI 没有返回所选镜像的处理器架构。",
                     L"OpenRCV", MB_ICONERROR);
         return;
     }
-
-    const std::wstring bootDisplay = boot.root.empty() ? L"无盘符" : boot.root;
-    std::wstring confirmation = L"即将把 Windows 安装到：\n\n" + target.root +
-        L"  磁盘/分区 " + PartitionIdentity(target) + L"\n引导分区：" +
-        bootDisplay + L"  " + PartitionIdentity(boot) + L"  " +
-        (boot.efiSystemPartition ? L"EFI 系统分区" : L"MBR 活动分区") + L"\n\n";
-    if (format) confirmation += L"目标分区将被格式化，现有数据会永久丢失。\n\n";
-    confirmation += L"是否确认开始安装？";
-    if (MessageBoxW(g_app.window, confirmation.c_str(), L"确认安装目标",
-                    MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) return;
-
-    const bool temporaryBootMount = boot.root.empty();
-    std::wstring mountError;
-    if (!openrcv::storage::MountVolumeWithTemporaryLetter(boot, mountError)) {
-        MessageBoxW(g_app.window, mountError.c_str(), L"OpenRCV", MB_ICONERROR);
-        return;
-    }
-    if (temporaryBootMount) {
-        AppendLog(L"已将引导分区临时挂载到 " + boot.root);
-    }
-
-    openrcv::workflow::DeploymentRequest request;
-    request.imageFile = g_app.imageFile;
-    request.imageIndex = imageIndex;
-    request.targetRoot = target.root;
-    request.systemPartitionRoot = boot.root;
-    request.bootFirmware = boot.efiSystemPartition
-        ? openrcv::workflow::BootFirmware::Uefi
-        : openrcv::workflow::BootFirmware::Bios;
-    request.formatTarget = format;
-    if (format) request.confirmedFormatTarget = target.root;
     openrcv::config::AdvancedSettings advancedSettings;
+    advancedSettings.skipWindows11HardwareChecks =
+        IsChecked(IDC_ADV_SKIP_WIN11_HARDWARE);
     advancedSettings.disableWindowsUpdate = IsChecked(IDC_ADV_DISABLE_UPDATE);
     advancedSettings.notifyBeforeWindowsUpdateDownload =
         IsChecked(IDC_ADV_NOTIFY_UPDATE);
@@ -737,8 +497,39 @@ void StartInstallation() {
     advancedSettings.disableUac = IsChecked(IDC_ADV_DISABLE_UAC);
     advancedSettings.preventBitLocker = IsChecked(IDC_ADV_PREVENT_BITLOCKER);
     advancedSettings.excludeWindowsUpdateDrivers = IsChecked(IDC_ADV_EXCLUDE_DRIVERS);
+
+    const std::wstring bootDisplay = boot.root.empty() ? L"无盘符" : boot.root;
+    std::wstring confirmation = L"即将把 Windows 安装到：\n\n" + target.root +
+        L"  磁盘/分区 " + PartitionIdentity(target) + L"\n引导分区：" +
+        bootDisplay + L"  " + PartitionIdentity(boot) + L"  " +
+        (boot.efiSystemPartition ? L"EFI 系统分区" : L"MBR 活动分区") + L"\n\n";
+    if (format) confirmation += L"目标分区将被格式化，现有数据会永久丢失。\n\n";
+    confirmation += L"是否确认开始安装？";
+    if (MessageBoxW(g_app.window, confirmation.c_str(), L"确认安装目标",
+                    MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) return;
+
+    const bool temporaryBootMount = boot.root.empty();
+    std::wstring mountError;
+    if (!openrcv::storage::MountVolumeWithTemporaryLetter(boot, mountError)) {
+        MessageBoxW(g_app.window, mountError.c_str(), L"OpenRCV", MB_ICONERROR);
+        return;
+    }
+    if (temporaryBootMount) {
+        AppendLog(L"已将引导分区临时挂载到 " + boot.root);
+    }
+
+    openrcv::workflow::DeploymentRequest request;
+    request.imageFile = g_app.imageFile;
+    request.imageIndex = imageIndex;
+    request.targetRoot = target.root;
+    request.systemPartitionRoot = boot.root;
+    request.bootFirmware = boot.efiSystemPartition
+        ? openrcv::workflow::BootFirmware::Uefi
+        : openrcv::workflow::BootFirmware::Bios;
+    request.formatTarget = format;
+    if (format) request.confirmedFormatTarget = target.root;
     request.configureOfflineSettings = advancedSettings.AnyEnabled();
-    const auto plan = openrcv::workflow::BuildDeploymentPlan(request);
+    auto plan = openrcv::workflow::BuildDeploymentPlan(request);
     if (!plan.IsValid()) {
         std::wstring errors = L"无法开始安装：\n";
         for (const auto& error : plan.errors) errors += L"\n• " + error;
@@ -750,9 +541,9 @@ void StartInstallation() {
         return;
     }
 
-    InstallationTask task;
-    task.plan = plan;
-    task.unattendOptions = selectedUnattendOptions;
+    openrcv::workflow::DeploymentTask task;
+    task.plan = std::move(plan);
+    task.unattendOptions = std::move(selectedUnattendOptions);
     task.unattendOptions.pauseWindowsUpdate =
         advancedSettings.disableWindowsUpdate;
     task.unattendOptions.createLocalAdministrator = createLocalAdministrator;
@@ -868,6 +659,7 @@ void CreateUi(HWND window) {
         int id;
         bool checked;
     } advancedSettings[] = {
+        {L"跳过 Windows 11 硬件检测（不保证不兼容 CPU 可启动）", IDC_ADV_SKIP_WIN11_HARDWARE, true},
         {L"禁用 Windows Update（计划任务每周续期暂停）", IDC_ADV_DISABLE_UPDATE, false},
         {L"Windows Update 仅通知，不自动下载或安装", IDC_ADV_NOTIFY_UPDATE, false},
         {L"显示已知文件类型的扩展名", IDC_ADV_SHOW_EXTENSIONS, true},
@@ -1101,8 +893,8 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         SendMessageW(g_app.progress, PBM_SETPOS, wParam, 0);
         return 0;
     case WM_INSTALL_COMPLETE: {
-        std::unique_ptr<InstallationResult> result(
-            reinterpret_cast<InstallationResult*>(lParam));
+        std::unique_ptr<openrcv::workflow::DeploymentResult> result(
+            reinterpret_cast<openrcv::workflow::DeploymentResult*>(lParam));
         if (g_app.installationThread.joinable()) g_app.installationThread.join();
         g_app.installationRunning.store(false, std::memory_order_relaxed);
         g_app.cancellationRequested.store(false, std::memory_order_relaxed);
